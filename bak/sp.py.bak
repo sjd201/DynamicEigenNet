@@ -1,0 +1,171 @@
+from Vec import OrderVec, SyntagmaticVec, SPVec, Vec
+from Memory import OrderMemory, SyntagmaticMemory, SPMemory
+from scipy.sparse import *
+import numpy as np
+import history
+from matplotlib import pyplot as plt
+from time import time
+from sys import stdout
+from math import sqrt
+import pyttsx3
+import log
+from random import randint
+
+from speechinput import recognize_speech_from_mic
+
+speechengine = pyttsx3.init()
+
+corpus = []
+OrderThreshold = 0.1 # threshold that length of retreived order information must reach before it is used as a retreival cue to SP memory
+
+def resetMemory():
+  global O, S, P, SP
+
+  O = OrderMemory()
+  S = SyntagmaticMemory()
+  SP = [SPMemory() for i in range(OrderVec.NumberOfSlots)]
+
+def encodeCorpus():
+  global corpus, rawcorpus
+
+  while rawcorpus != []:
+    corpus.append(rawcorpus.pop(0))
+    probe = " ".join(corpus[-Vec.NumberOfSlots:])
+    log.write("")
+    log.write("Encode " + probe)
+    encode(probe)
+
+def encode(probe):
+  global o, s, sp
+  toks = probe.split()
+  toks = toks[-Vec.NumberOfSlots:]
+  toks += ["_"] * max(0, Vec.NumberOfSlots - len(toks))
+  probe = " ".join(toks)
+  i = OrderVec(probe)
+  O.addTrace(i) 
+  o = O.getEcho(i, verbose=True)
+  si = SyntagmaticVec(probe).normalize()
+  S.addTrace(si)
+  s = S.getEcho(si).normalize()
+  sp = []
+  for k in range(OrderVec.NumberOfSlots):
+    log.write("SP Slot %d:" % k)
+    if toks[k] != "_":  # encode blanks as 0s
+      ok = o.bank(k).normalize()
+      sp.append(si.cat(ok.cat(i.bank(k))))
+      SP[k].addTrace(sp[k])
+    #else:
+    #  sp.append(SPVec.zero())
+    #  SP[k].addTrace(SPVec.zero())
+    
+def retrieveEcho(probe = "# who is bellamira loved by ? # _ _ _"):
+  global o, s, sp, spechos
+  res = OrderVec("")
+  i = OrderVec(probe)
+  o = O.getEcho(i) 
+  si = SyntagmaticVec(probe)
+  s = S.getEcho(si)
+  toks = probe.split()
+  for j in range(Vec.NumberOfSlots):
+    oj = o.bank(j)
+    slotlength = oj.length()
+    if slotlength > OrderThreshold:
+      sp = s.cat(oj.cat(SyntagmaticVec("")))
+      specho = SP[j].getEcho(sp)
+      res.setBank(j, specho.bank(2))
+    else:
+      log.write("Order vec for this bank is not large enough to use as a retreival cue.")
+  return res
+
+def getWords(echo):
+  res = []
+  for j in range(Vec.NumberOfSlots):
+    res += [echo.bank(j).maxItems()]
+  return res
+
+def retrieve(probe = "# who is bellamira loved by ? # _ _ _"):
+  echo = retrieveEcho(probe)
+  return getWords(echo)
+
+def load(filename):
+  global rawcorpus
+
+  resetMemory()
+  rawcorpus = open(filename, "r").read()
+  rawcorpus = rawcorpus.lower().split()
+  log.write("corpus size = " + str(len(rawcorpus)) + " vocab size = " + str(len(set(rawcorpus))))
+  encodeCorpus()
+
+load("tiny.cor")
+
+def spinput(voice=False, PROMPT_LIMIT=5):
+  if voice:
+    for j in range(PROMPT_LIMIT):
+      print("Wating for input")
+      guess = recognize_speech_from_mic()
+      if guess["transcription"]:
+        break
+      if not guess["success"]:
+        break
+      r = randint(1,3)
+      if r == 1:
+        speechengine.say("I didn't catch that")
+      elif r == 2:
+        speechengine.say("Sorry")
+      else:
+        speechengine.say("What did you say")
+      speechengine.runAndWait()
+    inp = guess["transcription"]
+  else:
+    inp = input("> ")
+  return inp
+
+def spoutput(speechoutput, voice=False):
+  if voice:
+    if speechoutput != "":
+      speechengine.say(speechoutput)
+      speechengine.runAndWait()
+  else:
+      print(speechoutput)
+
+def conversation():
+  global rawcorpus
+
+  spoutput("good morning sir ")
+  inp = ""
+  while inp.lower() != "goodbye jamie":
+    inp = spinput()
+    log.write("Input: "+ inp)
+    if inp.lower() != "goodbye jamie":
+      inp = " " + inp + " "
+      rawcorpus = inp.split()
+      encodeCorpus()
+      suffix = ["_"] * 3
+      probe = " ".join(corpus[-(Vec.NumberOfSlots-len(suffix)):] + suffix)
+      log.write("Probe: " + probe)
+      retrieved = retrieve(probe)
+      log.write("Retrieved: " + " ".join(retrieved))
+      output = retrieved[-len(suffix):]
+      log.write("Output: "+ " ".join(output))
+      
+      while "_" not in output and len(suffix) < 8:
+        suffix += ["_"]
+        probe = " ".join(corpus[-Vec.NumberOfSlots:] + suffix)
+        log.write( "Probe: "+ probe)
+        retrieved = retrieve(probe)
+        log.write("Retrieved: " + " ".join(retrieved))
+        output = retrieved[-len(suffix):]
+        log.write( "Output: "+ " ".join(output))
+      i = -len(suffix)
+      while i < 0 and output[i] != "_":
+        i += 1
+      rawcorpus = output[-len(suffix):i]
+      speechoutput = " ".join(rawcorpus)
+      log.write("Output: "+ speechoutput)
+      rawcorpus += "_ _ _ _ _ _ _ _ _ _ _ _ _ _".split()
+      encodeCorpus()
+          
+      spoutput(speechoutput)
+  spoutput("goodbye sir ")
+
+conversation()
